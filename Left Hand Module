@@ -1,0 +1,232 @@
+/*
+ * MPU6050 Triple Axis Gyroscope & Accelerometer. Simple Accelerometer Example.
+ * Read more: http://www.jarzebski.pl/arduino/czujniki-i-sensory/3-osiowy-zyroskop-i-akcelerometr-mpu6050.html
+ * GIT: https://github.com/jarzebski/Arduino-MPU6050
+ * Web: http://www.jarzebski.pl
+ * (c) 2014 by Korneliusz Jarzebski
+ * 
+ *    Left Arduino Nano pin:
+ *    D2 : Joystick SW
+ *    A4 : Joystick X
+ *    A5 : Joystick Y
+ *(I swap x and y from joystick)
+ */
+// MPU Library
+#include <Wire.h>
+
+// RF Library
+#include <SPI.h>
+#include "RF24.h"
+#include <nRF24L01.h>
+
+#define joyX A2
+#define joyY A3
+#include <SoftwareSerial.h> //Arduino I2C library
+
+#include <MPU6050.h>
+MPU6050 mpu;
+RF24 radio(7, 8); // CE腳, CSN腳
+const byte addr[] = "1Node";
+const int Left = 108;
+const int buttonPin = 2; 
+int xValue = 0;
+int yValue = 0;
+int SW = 0;
+
+struct MPU_data
+{
+  float Name = 1; // 1 represent Left Module
+  float Ax = 0;
+  float Ay = 0;
+  float Joystick = 10; 
+  float SW = 0;
+  //Total 20 bytes
+};
+MPU_data data;
+/*
+ * Joystick:
+ * 
+ *      7 8 9
+ *      4   6
+ *      1 2 3
+ * 7: LeftUp, 8: Up, 9: RightUp
+ * 4: Left, 6: Right.
+ * 1: LeftDown, 2: Down, 3: Rightdown
+ * 
+ * SW:
+ * 1 --> Pressed
+ * 0 --> No signal
+ */
+byte msg[32] = "";
+
+void setup()
+{
+  Serial.begin(115200);
+  pinMode(buttonPin, INPUT_PULLUP);
+  //MPU Setting:
+  Serial.println("Initialize MPU6050");
+
+  while (!mpu.begin(MPU6050_SCALE_2000DPS, MPU6050_RANGE_2G))
+  {
+    Serial.println("Could not find a valid MPU6050 sensor, check wiring!");
+    delay(500);
+  }
+
+  // If you want, you can set accelerometer offsets
+  // mpu.setAccelOffsetX();
+  // mpu.setAccelOffsetY();
+  // mpu.setAccelOffsetZ();
+
+  // If you want, you can set gyroscope offsets
+  // mpu.setGyroOffsetX(155);
+  // mpu.setGyroOffsetY(15);
+  // mpu.setGyroOffsetZ(15);
+
+
+  // Calibrate gyroscope. The calibration must be at rest.
+  // If you don't want calibrate, comment this line.
+
+  // Set threshold sensivty. Default 3.
+  // If you don't want use threshold, comment this line or set 0.
+
+  mpu.setThreshold(3);
+  mpu.calibrateGyro();
+  checkSettings();
+
+  // RF Settings:
+  Serial.println("Initialize NRF24L01");
+  radio.begin();
+  radio.setChannel(Left);       // 設定頻道編號
+  radio.openWritingPipe(addr); // 設定通道位址
+  radio.setPALevel(RF24_PA_MIN);   // 設定廣播功率
+  radio.setDataRate(RF24_250KBPS); // 設定傳輸速率
+  radio.stopListening();       // 停止偵聽；設定成發射模式
+  Serial.println("nRF24L01 ready to transmit!!");
+}
+
+void checkSettings()
+{
+  Serial.println();
+
+  Serial.print(" * Sleep Mode:            ");
+  Serial.println(mpu.getSleepEnabled() ? "Enabled" : "Disabled");
+
+  Serial.print(" * Clock Source:          ");
+  switch (mpu.getClockSource())
+  {
+    case MPU6050_CLOCK_KEEP_RESET:     Serial.println("Stops the clock and keeps the timing generator in reset"); break;
+    case MPU6050_CLOCK_EXTERNAL_19MHZ: Serial.println("PLL with external 19.2MHz reference"); break;
+    case MPU6050_CLOCK_EXTERNAL_32KHZ: Serial.println("PLL with external 32.768kHz reference"); break;
+    case MPU6050_CLOCK_PLL_ZGYRO:      Serial.println("PLL with Z axis gyroscope reference"); break;
+    case MPU6050_CLOCK_PLL_YGYRO:      Serial.println("PLL with Y axis gyroscope reference"); break;
+    case MPU6050_CLOCK_PLL_XGYRO:      Serial.println("PLL with X axis gyroscope reference"); break;
+    case MPU6050_CLOCK_INTERNAL_8MHZ:  Serial.println("Internal 8MHz oscillator"); break;
+  }
+
+  Serial.print(" * Accelerometer:         ");
+  switch (mpu.getRange())
+  {
+    case MPU6050_RANGE_16G:            Serial.println("+/- 16 g"); break;
+    case MPU6050_RANGE_8G:             Serial.println("+/- 8 g"); break;
+    case MPU6050_RANGE_4G:             Serial.println("+/- 4 g"); break;
+    case MPU6050_RANGE_2G:             Serial.println("+/- 2 g"); break;
+  }
+
+  Serial.print(" * Gyroscope:         ");
+  switch (mpu.getScale())
+  {
+    case MPU6050_SCALE_2000DPS:        Serial.println("2000 dps"); break;
+    case MPU6050_SCALE_1000DPS:        Serial.println("1000 dps"); break;
+    case MPU6050_SCALE_500DPS:         Serial.println("500 dps"); break;
+    case MPU6050_SCALE_250DPS:         Serial.println("250 dps"); break;
+  }
+
+  Serial.print(" * Gyroscope offsets: ");
+  Serial.print(mpu.getGyroOffsetX());
+  Serial.print(" / ");
+  Serial.print(mpu.getGyroOffsetY());
+  Serial.print(" / ");
+  Serial.println(mpu.getGyroOffsetZ());
+
+  Serial.println();
+  }
+void GetDirection(int xValue, int yValue){
+  
+  if ((xValue <= 30) && (yValue > 30) && (yValue < 70)){
+    data.Joystick = 8; //up
+  }
+  else if ((xValue >=70) && (yValue > 30) && (yValue < 70)){
+    data.Joystick = 6; //right
+  }
+  else if ((xValue > 30) && (xValue < 70) && (yValue <= 30)){
+    data.Joystick = 2; //down
+  }
+  else if ((xValue > 30) && (xValue < 70) && (yValue >= 70)){
+    data.Joystick = 4; //left
+  }
+  else {
+    data.Joystick = 0; // no valid data
+  }
+  Serial.print("Joystick data: ");
+  Serial.println(data.Joystick);
+}
+
+float GetSW_value(int SW){
+  float S;
+  if (SW == 1){ //Pressed
+    S = 1;
+  }
+  else { // No signal
+    S = 0;
+  }
+  return S;
+}
+void loop()
+{
+  // Get Joystick data
+  xValue = analogRead(joyX);
+  yValue = analogRead(joyY);
+  SW = !(digitalRead(buttonPin));
+  xValue = map(xValue, 0, 1023, 0, 100);
+  yValue = map(yValue, 0, 1023, 0 ,100);
+  GetDirection(xValue, yValue);
+  data.SW = GetSW_value(SW);
+  
+    /* 12 data from MPU6050
+     Accelermeter:
+      RAW:  rawAccel.XAxis, rawAccel.YAxis, rawAccel.ZAxis
+      NORM: normAccel.XAxis, normAccel.YAxis, normAccel.YAxis
+     Gyroscope:
+      RAW: rawGyro.XAxis, rawGyro.YAxis, rawGyroZAxis
+      NORM: normGyro.XAxis, normGyro.YAxis, normGyro.ZAxis
+    */
+    
+  Vector rawAccel = mpu.readRawAccel();
+  //data.Ax = rawAccel.XAxis;
+  //data.Ay = rawAccel.YAxis;
+  //data.Az = rawAccel.ZAxis;
+  Vector normAccel = mpu.readNormalizeAccel(); 
+  data.Ax = normAccel.XAxis;
+  data.Ay = normAccel.YAxis;
+  //data.Az = normAccel.ZAxis; 
+  Vector rawGyro = mpu.readRawGyro();
+  //data.Gx = rawGyro.XAxis;
+  //data.Gy = rawGyro.YAxis;
+  //data.Gz = rawGyro.ZAxis;
+  Vector normGyro = mpu.readNormalizeGyro();
+  //data.Gx = normGyro.XAxis;
+  //data.Gy = normGyro.YAxis;
+  //data.Gz = normGyro.ZAxis;
+
+  Serial.print("Name: ");
+  Serial.println(data.Name);
+  Serial.print("Ax: ");
+  Serial.println(data.Ax);
+  Serial.print("Ay: ");
+  Serial.println(data.Ay);
+  Serial.print("Joystick:");
+  Serial.println(data.Joystick);
+  Serial.print("SW: ");
+  Serial.println(data.SW);
+  radio.write(&data, sizeof(data));  // Transmit data
+}
