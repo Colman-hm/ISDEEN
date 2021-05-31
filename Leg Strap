@@ -1,0 +1,536 @@
+/*ESP32_Module_V1
+ *Receive Left and Right Module data consecutively
+ *no data storage
+ *just display what it receives
+ *Left Channel :100
+ *Right Channel:120
+ *Included the bluetooth transmission
+ *Included the MPU module
+ *==============================================================================================
+ * Linked list reference: https://github.com/ivanseidel/LinkedList (All command tutorials)
+ * Basic Command:
+ * Words betwenn ' ' are user define.
+ * 
+ * Initialization: 
+ * LinkedList<'data type'>  'name'  = LinkedList<'data type'>();
+ * Example: LinkedList<float> Left_Ax = LinkedList<float>();
+ * 
+ * Adding element: add(obj) method will insert at the END of the list
+ * 'name'.add('value')
+ * Example: ESP32_Ax.add(Ax);                      
+ * 
+ * Shifting element: shift() will remove and return the FIRST element
+ * 'name'.shift();
+ * Example: Left_Gz.shift();
+ * 
+ * Clear: 
+ * 'myList'.clear();
+ * Example: ESP32_Ax.clear();
+ * 
+ * Get Linked list size: To get the size of a linked list, make use of the size() method
+ * int theSize = myList.size();
+ * ===============================================================================================
+ * 
+ */
+#include "soc/soc.h"
+#include "soc/rtc_cntl_reg.h"
+
+#include <Wire.h>
+#include <MPU6050.h>
+
+MPU6050 mpu;
+
+//ESP32 Bluetooth basic
+
+#include "BluetoothSerial.h"
+
+#if !defined(CONFIG_BT_ENABLED) || !defined(CONFIG_BLUEDROID_ENABLED)
+#error Bluetooth is not enabled! Please run `make menuconfig` to and enable it
+#endif
+
+BluetoothSerial SerialBT;
+char input; // From Serial input(Mainly for testing purpose)
+
+
+#include <nRF24L01.h>
+#include <RF24.h>
+#include <RF24_config.h>
+
+RF24 radio(12, 14, 26, 25, 27);
+
+const byte address[][6]={"1Node","2Node"};
+char p = 1; //pipe
+byte msg[32];
+
+struct Blu_data
+{
+  int workout = 0;      // 0: Did not receive message from game to do task, 1: KneePull, 2: XJump, 3: FootFire
+  int numOfWorkout = 0; // range: 
+};
+Blu_data Task;
+struct Left_Signal
+{
+  char movement;
+  char SW;
+};
+Left_Signal Left;
+
+struct Right_Signal
+{
+  char SW1;
+  char SW2;
+};
+Right_Signal Right;
+
+struct MPU_data
+{
+  float Name = 0; // 1 represent Left Module; 2 represent Right Module
+  float Ax = 0;
+  float Ay = 0;
+  float C1 = 0; 
+  float C2 = 0;
+  //Total 20 bytes
+};
+MPU_data data, Left_data, Right_data;
+
+struct ESP_MPU
+{
+  float Ax;
+  float Ay;
+  float Az;
+  float Gx;
+  float Gy;
+  float Gz;
+};
+ESP_MPU ESP32_data;
+
+int flag = 0;
+bool success = false;
+int workoutCounter = 0;
+int count_Left = 0;
+int count_Right = 0;
+
+unsigned long previousMillis = 0; //Replacing Delay
+const long interval = 1000; //Delay time
+const int CHANNEL = 108;
+void setup()
+{
+  Serial.begin(9600);
+  SerialBT.begin("ESP32test");
+  Serial.println("The device started, now you can pair it with bluetooth!");
+  Serial.print("Task.workout: ");
+  Serial.println(Task.workout);
+  Serial.println("");
+  while(!mpu.begin(MPU6050_SCALE_2000DPS, MPU6050_RANGE_2G))
+  {
+    Serial.println("Could not find a valid MPU6050 sensor, check wiring!");
+    delay(500);
+  }
+  // If you want, you can set accelerometer offsets
+  // mpu.setAccelOffsetX();
+  // mpu.setAccelOffsetY();
+  // mpu.setAccelOffsetZ();
+
+  // If you want, you can set gyroscope offsets
+  // mpu.setGyroOffsetX(155);
+  // mpu.setGyroOffsetY(15);
+  // mpu.setGyroOffsetZ(15);
+  
+  // Calibrate gyroscope. The calibration must be at rest.
+  // If you don't want calibrate, comment this line.
+  mpu.calibrateGyro();
+
+  // Set threshold sensivty. Default 3.
+  // If you don't want use threshold, comment this line or set 0.
+  mpu.setThreshold(3);
+  
+  checkSettings();
+  //End of setting up MPU-6050
+  //Start to set up nRF24L01
+  radio.begin();
+  radio.setChannel(CHANNEL);  // 設定頻道編號
+
+  radio.openReadingPipe(0, address[0]);   //Setting the address at which we will receive the data (pipe,address)
+  radio.openReadingPipe(1, address[1]);
+  radio.setPALevel(RF24_PA_MAX);       //You can set this as minimum or maximum depending on the distance between the transmitter and receiver.
+  radio.setDataRate(RF24_250KBPS);
+
+  radio.startListening();              //This sets the module as receiver
+}
+
+void checkSettings() //Function for MPU-6050
+{
+  Serial.println();
+  
+  Serial.print(" * Sleep Mode:            ");
+  Serial.println(mpu.getSleepEnabled() ? "Enabled" : "Disabled");
+  
+  Serial.print(" * Clock Source:          ");
+  switch(mpu.getClockSource())
+  {
+    case MPU6050_CLOCK_KEEP_RESET:     Serial.println("Stops the clock and keeps the timing generator in reset"); break;
+    case MPU6050_CLOCK_EXTERNAL_19MHZ: Serial.println("PLL with external 19.2MHz reference"); break;
+    case MPU6050_CLOCK_EXTERNAL_32KHZ: Serial.println("PLL with external 32.768kHz reference"); break;
+    case MPU6050_CLOCK_PLL_ZGYRO:      Serial.println("PLL with Z axis gyroscope reference"); break;
+    case MPU6050_CLOCK_PLL_YGYRO:      Serial.println("PLL with Y axis gyroscope reference"); break;
+    case MPU6050_CLOCK_PLL_XGYRO:      Serial.println("PLL with X axis gyroscope reference"); break;
+    case MPU6050_CLOCK_INTERNAL_8MHZ:  Serial.println("Internal 8MHz oscillator"); break;
+  }
+  
+  Serial.print(" * Accelerometer:         ");
+  switch(mpu.getRange())
+  {
+    case MPU6050_RANGE_16G:            Serial.println("+/- 16 g"); break;
+    case MPU6050_RANGE_8G:             Serial.println("+/- 8 g"); break;
+    case MPU6050_RANGE_4G:             Serial.println("+/- 4 g"); break;
+    case MPU6050_RANGE_2G:             Serial.println("+/- 2 g"); break;
+  }  
+  
+  Serial.print(" * Gyroscope:         ");
+  switch(mpu.getScale())
+  {
+    case MPU6050_SCALE_2000DPS:        Serial.println("2000 dps"); break;
+    case MPU6050_SCALE_1000DPS:        Serial.println("1000 dps"); break;
+    case MPU6050_SCALE_500DPS:         Serial.println("500 dps"); break;
+    case MPU6050_SCALE_250DPS:         Serial.println("250 dps"); break;
+  } 
+  
+  Serial.print(" * Gyroscope offsets: ");
+  Serial.print(mpu.getGyroOffsetX());
+  Serial.print(" / ");
+  Serial.print(mpu.getGyroOffsetY());
+  Serial.print(" / ");
+  Serial.println(mpu.getGyroOffsetZ());
+  
+  Serial.println();
+}
+
+int receiveData()
+{
+  byte pipe_num;
+  if (radio.available(&pipe_num))
+  {
+    radio.read(&data, sizeof(data));
+    Serial.print("Pipe num= ");
+    Serial.println(pipe_num);
+    return 1;
+  }
+  return 0;
+}
+
+void display(MPU_data data){
+  Serial.println("Display Function");
+  Serial.println("-------------------------");
+  
+  if (data.Name == 1){
+    Serial.println("Left Module");
+  }
+  else if(data.Name == 2){
+    Serial.println("Right Module");
+  }
+  Serial.print("Ax: ");
+  Serial.println(data.Ax);
+  Serial.print("Ay: ");
+  Serial.println(data.Ay);
+  Serial.print("First Signal: ");
+  Serial.println(data.C1);
+  Serial.print("Second Signal:");
+  Serial.println(data.C2);
+  Serial.println("-------------------------");
+}
+
+void Bluetooth_Transmit_Test(){ //Transmit data to Game through bluetooth
+    if (Serial.available()){
+    input = Serial.read();
+  }
+}
+void Bluetooth_Transmit(char msg){
+      switch (msg){
+      case 'W': // Joystick Up
+        SerialBT.println("move|0,1");
+      break;
+
+      case 'A': // Joystick Left
+        SerialBT.println("move|-1,0");
+      break;
+
+      case 'S':// Joystick Down
+        SerialBT.println("move|0,-1");
+      break;
+
+      case 'D':// Joystick Right
+        SerialBT.println("move|1,0");
+      break;
+
+      case 'H':// Button 1
+        SerialBT.println("action|a");
+      break;
+
+      case 'J': //button 2
+        SerialBT.println("action|b");
+      break;
+
+      case 'K': //button 3
+        SerialBT.println("action|c");
+      break;
+
+      case 'L': // press two buton at the same time
+        SerialBT.println("action|d");
+      break;
+
+      case 'I': // Did the correct motion - > count += 1
+        SerialBT.println("exercise|true");
+      break;
+
+    }
+}
+Blu_data Bluetooth_Receive( Blu_data Game_message){ //Receive data from Game
+    if (SerialBT.available()) {
+      String BTdata = SerialBT.readString();
+      Serial.println(BTdata);
+      int pos = BTdata.indexOf(',');
+      String number_of_times = BTdata.substring(pos+1);
+      Game_message.numOfWorkout = number_of_times.toInt(); // Get number of times need to do for the workout task
+      
+      String workout_type = BTdata.substring(0, pos); // Get the string of the workout name
+      if (workout_type == "Knee Pull"){
+        Game_message.workout = 1;
+      }
+      else if (workout_type == "X jump"){
+        Game_message.workout = 2;
+      }
+      else if (workout_type == "Footfire"){
+        Game_message.workout = 3;
+      }
+      Serial.println("============================================================");
+      Serial.print("Received message from game is: ");
+      Serial.println(BTdata);
+      Serial.print("Workout Type is: ");
+      Serial.println(workout_type);
+      Serial.print("Player has to do ");
+      Serial.print(Game_message.numOfWorkout);
+      Serial.println(" times.");
+      Serial.print("Game_message.workout: ");
+      Serial.println(Game_message.workout);
+      Serial.println("============================================================");
+  }
+  return Game_message;
+}
+
+ESP_MPU GetESP32_MPUdata(){
+  ESP_MPU ESP32_data;
+  Vector rawAccel = mpu.readRawAccel();
+  Vector normAccel = mpu.readNormalizeAccel();
+
+  //Ax = rawAccel.XAxis;
+  //Ay = rawAccel.YAxis;
+  //Az = rawAccel.ZAxis;
+
+  ESP32_data.Ax = normAccel.XAxis;
+  ESP32_data.Ay = normAccel.YAxis;
+  ESP32_data.Az = normAccel.ZAxis;
+  
+  Vector rawGyro = mpu.readRawGyro();
+  Vector normGyro = mpu.readNormalizeGyro();
+
+  //Gx = rawGyro.XAxis;
+  //Gy = rawGyro.YAxis;
+  //Gz = rawGyro.ZAxis;
+
+  ESP32_data.Gx = normGyro.XAxis;
+  ESP32_data.Gy = normGyro.YAxis;
+  ESP32_data.Gz = normGyro.ZAxis;
+
+  return ESP32_data;
+}  
+
+/*KneePull
+ * RightHand: Ay
+ * LeftHand: Ay
+ * legData1: Gx
+ * legData1: Ay
+ *XJump
+ * Righthand: Ax
+ * Lefthand: Ax
+ * legData: Gx
+ * 
+ * footFire
+ * Righthand: Ax
+ * Lefthand: AX
+ * Legdata: Ay
+ * 
+ */
+bool kneePullChecking(int numOfWorkout, float rightHandData, float leftHandData, float legData1, float legData2){ 
+    if (rightHandData > 15 && leftHandData > 15 && legData1 < -180 && legData2 > 15){
+      flag = 1;
+      return false;
+    }
+    if (rightHandData < -1 && leftHandData < -2 && legData1 > 200 && legData2 < -2 && flag == 1 ){
+        flag = 0;
+        return true;
+        /*if (Serial.available()){
+          SerialBT.println(success);
+          Serial.println("Success");
+        }
+        else{
+          Serial.println("Serial not available!");
+        }*/
+      }
+}
+
+bool XJumpChecking(int numOfWorkout, float rightHandData, float leftHandData, float legData){
+    if (rightHandData > 15 && leftHandData < 15 && leftHandData > -20 && legData > 150){
+      flag = 1;
+      return false;
+    }
+    if (rightHandData < -1 && leftHandData < 15 && leftHandData > -20  && legData < -50 && flag == 1 ){
+        flag = 0;
+        return true;
+        /*if (Serial.available()){
+          //SerialBT.println("Success");
+          Serial.println("Success");
+        }
+        else{
+          Serial.println("Serial not available!");
+        }*/
+      }
+}
+
+bool footFireChecking(int numOfWorkout, float rightHandData, float leftHandData, float legData){
+    if (rightHandData > 50 && leftHandData > 50 && legData > 100){
+      flag = 1;
+      return false;
+    }
+    if (rightHandData < -50 && leftHandData < -50 && legData < -50 && flag == 1 ){
+        flag = 0;
+        return true;
+        /*if (Serial.available()){
+          SerialBT.write(sucess);
+          Serial.println("Success");
+        }
+        else{
+          Serial.println("Serial not available!");
+        }*/
+      }
+}
+
+void loop()
+{ 
+  unsigned long currentMillis = millis(); // Read Current ESP32 time
+  Task = Bluetooth_Receive(Task);
+  if ((Task.workout > 0) && (Task.workout < 4)){ //Task mode, leave this until finish the task
+    Serial.print("<<<<<");
+    Serial.print("Task Mode");
+    Serial.println(">>>>>");
+    ESP32_data = GetESP32_MPUdata();
+    if (receiveData()){
+      display(data);
+      
+      if (data.Name == 1){ //data received from Left module
+        count_Left++;
+        Left_data = data;
+      }
+      else if (data.Name == 2){//data received from Right module
+        count_Right++;
+        Right_data = data;
+      }
+      
+      if ((count_Left > 0) && (count_Right > 0)){ //Received both module at least once
+        Serial.println("Received both data!");
+        Serial.println("============================================================");
+        count_Left = 0;
+        count_Right = 0;
+        
+        switch (Task.workout){
+          case 1: 
+            success = kneePullChecking(Task.numOfWorkout, Right_data.Ay, Left_data.Ay, ESP32_data.Gx, ESP32_data.Ay);
+          break;
+          
+          case 2:
+            success = XJumpChecking(Task.numOfWorkout, Right_data.Ax, Left_data.Ax, ESP32_data.Gx);
+          break;
+
+          case 3:
+            success = footFireChecking(Task.numOfWorkout, Right_data.Ax, Left_data.Ax, ESP32_data.Ay);
+          break; 
+        }
+        if (success){ // Success for doing the correct motion -> Count once
+          workoutCounter++;
+          Bluetooth_Transmit('I');
+          Serial.println("Success!");
+          Serial.print("You have done ");
+          Serial.print(workoutCounter);
+          Serial.print("times! ");
+          Serial.print(Task.numOfWorkout-workoutCounter);
+          Serial.println(" times left, fighting!");
+          
+          if (workoutCounter >= Task.numOfWorkout){//Finish the task
+            Task.workout = 0;
+            Task.numOfWorkout = 0;
+            workoutCounter = 0;
+            Bluetooth_Transmit('V');//
+            Serial.println("The player has done the task! Well done!");             
+          }
+        }
+      }
+    }
+  }
+  else{ //Normal Mode --> Only receive Joystick and button signal
+    Serial.print("<<<<<");
+    Serial.print("Normal Mode");
+    Serial.println(">>>>>");
+    if (receiveData){ 
+      display(data);
+      if (data.Name == 1){ //data received from Left module
+        count_Left++;
+        Left_data = data;        
+      }
+      else if (data.Name == 2){//data received from Right module
+        count_Right++;
+        Right_data = data; 
+      }
+      if ((count_Left > 0) && (count_Right > 0)){ //Received both module at least 1
+        Serial.println("Received both data!");
+        Serial.println("============================================================");
+        count_Left = 0;
+        count_Right = 0;
+        
+        if ((Left_data.C2 == 1) && (Right_data.C1 == 1)){ //pressed 2 buttons at the same time
+          Bluetooth_Transmit('L');          
+        }
+        else if (Left_data.C2 ==  1){
+          Bluetooth_Transmit('H'); //Action 1
+        }
+        else if (Right_data.C1 == 1){ //Button 1
+          Bluetooth_Transmit('J'); //Action 2
+        }
+        else if(Right_data.C2 == 1){
+          Bluetooth_Transmit('K'); //Action 3
+        }
+        switch ((int)Left_data.C1){
+          case 8: 
+            Bluetooth_Transmit('W'); //Up
+          break; 
+
+          case 2:
+            Bluetooth_Transmit('S');  //Down
+          break;
+                    
+          case 4:
+            Bluetooth_Transmit('A');  //Down
+          break;
+                    
+          case 6:
+            Bluetooth_Transmit('D');  //Down
+          break;
+        }       
+      }
+    }
+  }
+  delay(1000);
+} 
+  
+  
+ /* if (currentMillis - previousMillis >= interval) { ////delay for time interval
+    previousMillis = currentMillis;*/
+  //Bluetooth_Transmit_test(); // Testing purpose, sending bluetooth signal through Serial
